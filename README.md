@@ -1,5 +1,29 @@
 # ve
 A terminal text/code editor
+# 标准命令和Lite命令(等号左边是标准命令，右边是Lite命令)
+```
+主命令：
+open = op
+move = mv
+line = ln
+break = bk
+write = wr
+space = sp
+del = del
+copy = cp
+paste = pt
+quit = q
+save = s
+qs = qs
+exit = et
+子命令/选项：
+left = l
+right = r
+start = st
+end = ed
+range = rng
+all =  a
+```
 # 如何在命令行使用
 ## Windows
 ```
