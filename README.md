@@ -16,6 +16,7 @@ quit = q
 save = s
 qs = qs
 exit = et
+tab = tab
 子命令/选项：
 left = l
 right = r
