@@ -24,7 +24,7 @@ start = st
 end = ed
 range = rng
 all =  a
-tab = tab
+tab = tab(此为预发布版本的更新）
 ```
 # 如何在命令行使用
 ## Windows
