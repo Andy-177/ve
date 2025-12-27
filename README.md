@@ -24,6 +24,7 @@ start = st
 end = ed
 range = rng
 all =  a
+tab = tab
 ```
 # 如何在命令行使用
 ## Windows
