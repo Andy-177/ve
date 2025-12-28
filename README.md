@@ -16,7 +16,7 @@ quit = q
 save = s
 qs = qs
 exit = et
-tab = tab
+tab = tab(此为预发布版本的更新）
 子命令/选项：
 left = l
 right = r
@@ -24,7 +24,6 @@ start = st
 end = ed
 range = rng
 all =  a
-tab = tab(此为预发布版本的更新）
 ```
 # 如何在命令行使用
 ## Windows
