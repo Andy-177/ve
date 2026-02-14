@@ -1,896 +1,212 @@
-import cmd
-import os
+#!/usr/bin/env python3
+"""
+VisualEditor (ve) - 基于Textual 7.3.0的文本编辑器
+"""
+
 import sys
-from typing import Dict
+from pathlib import Path
+from textual import on
+from textual.app import App, ComposeResult
+from textual.widgets import (
+    Header, Footer, TextArea, Input
+)
+import asyncio
 
-class VeEditor(cmd.Cmd):
-    """基于终端的文本编辑器，支持标签页和精简命令"""
 
-    prompt = 've> '
-    intro = 've文本编辑器 - 输入 help 查看命令帮助'
+class VisualEditor(App):
+    """VisualEditor 主应用"""
 
-    def __init__(self):
-        super().__init__()
-        # 编辑器状态：每个标签页一个状态
-        self.tabs: Dict[int, Dict] = {}  # {tab_id: state}
-        self.current_tab_id: int = 0      # 当前标签页 ID
-        self.next_tab_id: int = 1         # 下一个可用的标签页 ID
-        # 存储原始stdout用于重定向
-        self.original_stdout = sys.stdout
+    TITLE = "未命名"
+    SUB_TITLE = "编辑器"
+    CSS = """
+    #command-input {
+        width: 100%;
+        display: none;
+        margin: 0 1;
+    }
+    #editor {
+        width: 100%;
+    }
+    """
+    BINDINGS = [
+        ("ctrl+s", "save_file", "保存文件"),
+        ("ctrl+t", "command_input", "命令框"),
+        ("ctrl+l", "command_input", "命令框"),
+        ("ctrl+q", "quit_app", "直接退出(不保存)"),
+        ("shift+ctrl+q", "save_and_quit", "保存并退出"),
+    ]
 
-    def preloop(self):
-        """循环开始前的准备工作"""
-        self.clear_screen()
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.current_file: Path | None = None
+        self.is_modified = False
+        self.original_content = ""
+        self.check_modified_task = None
 
-    def clear_screen(self):
-        """清空屏幕"""
-        os.system('cls' if os.name == 'nt' else 'clear')
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Input(id="command-input", placeholder="输入命令...")
+        yield TextArea.code_editor(
+            "",
+            id="editor",
+            show_line_numbers=True
+        )
+        yield Footer()
 
-    def _init_tab_state(self, filename: str) -> Dict:
-        """初始化一个标签页的状态"""
-        return {
-            'is_active': True,
-            'current_file': filename,
-            'content': [''],  # 初始化一行空内容
-            'cursor': {
-                'row': 0,
-                'col': 0
-            },
-            'clipboard': ''
-        }
+    def on_mount(self) -> None:
+        self.editor = self.query_one("#editor", TextArea)
+        self.command_input = self.query_one("#command-input", Input)
+        self.original_content = self.editor.text
 
-    def _add_tab(self, filename: str) -> int:
-        """添加一个标签页，返回标签页 ID"""
-        tab_id = self.next_tab_id
-        self.tabs[tab_id] = self._init_tab_state(filename)
-        self.next_tab_id += 1
-        return tab_id
+        if self.current_file:
+            self.load_or_create_file(self.current_file)
 
-    def _switch_tab(self, tab_id: int):
-        """切换到指定标签页"""
-        if tab_id in self.tabs:
-            self.current_tab_id = tab_id
-        else:
-            print(f"标签页 {tab_id} 不存在")
+        self.update_title()
+        self.check_modified_task = asyncio.create_task(self.check_content_modified())
 
-    def _close_tab(self, tab_id: int):
-        """关闭指定标签页"""
-        if tab_id in self.tabs:
-            del self.tabs[tab_id]
-            # 如果关闭的是当前标签页，切换到下一个标签页
-            if self.current_tab_id == tab_id:
-                if self.tabs:
-                    self.current_tab_id = min(self.tabs.keys())
+    async def check_content_modified(self):
+        """定期检查内容是否被修改"""
+        try:
+            while True:
+                await asyncio.sleep(0.5)
+                current_content = self.editor.text
+                if current_content != self.original_content:
+                    if not self.is_modified:
+                        self.is_modified = True
+                        self.update_title()
                 else:
-                    self.current_tab_id = 0
-            # 更新 next_tab_id
-            if not self.tabs:
-                self.next_tab_id = 1
+                    if self.is_modified:
+                        self.is_modified = False
+                        self.update_title()
+        except asyncio.CancelledError:
+            pass
+
+    def update_title(self):
+        """只显示文件名，不显示路径"""
+        if self.current_file:
+            filename = self.current_file.name
+            self.title = f"{filename}{'*' if self.is_modified else ''}"
+        else:
+            self.title = f"未命名{'*' if self.is_modified else ''}"
+        self.sub_title = "编辑器"
+        self.refresh()
+
+    def load_or_create_file(self, file_path: Path) -> None:
+        """加载已有文件或创建新文件"""
+        try:
+            abs_path = file_path.expanduser().resolve()
+
+            if abs_path.exists() and abs_path.is_file():
+                with open(abs_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                self.editor.text = content
+                self.notify(f"已打开文件: {abs_path}", severity="success")
             else:
-                self.next_tab_id = max(self.tabs.keys()) + 1
+                self.editor.text = ""
+                self.notify(f"已创建新文件: {abs_path}", severity="success")
 
-    def _get_current_state(self) -> Dict:
-        """获取当前标签页的状态"""
-        if self.current_tab_id in self.tabs:
-            return self.tabs[self.current_tab_id]
-        return None
+            self.current_file = abs_path
+            self.original_content = self.editor.text
+            self.is_modified = False
+            self.update_title()
 
-    # 打开文件命令 - 支持 open 和 op
-    def do_open(self, arg):
-        """打开文件进行编辑: open <文件名> 或 op <文件名>，支持同时打开多个文件"""
-        if not arg:
-            print("请指定文件名: open <文件名> 或 op <文件名>")
-            return
+        except Exception as e:
+            self.notify(f"操作文件失败: {e}", severity="error")
 
-        filenames = arg.split()
-        for filename in filenames:
-            tab_id = self._add_tab(filename)
-            try:
-                # 尝试打开现有文件
-                with open(filename, 'r', encoding='utf-8') as f:
-                    self.tabs[tab_id]['content'] = f.readlines()
-                    # 移除每行末尾的换行符
-                    self.tabs[tab_id]['content'] = [line.rstrip('\n') for line in self.tabs[tab_id]['content']]
-            except FileNotFoundError:
-                # 创建新文件，确保初始化至少有一行空内容
-                pass
-
-            # 确保内容不为空（处理空文件的情况）
-            if not self.tabs[tab_id]['content']:
-                self.tabs[tab_id]['content'] = ['']
-
-            # 初始化光标位置
-            self.tabs[tab_id]['cursor'] = {'row': 0, 'col': 0}
-            self.tabs[tab_id]['clipboard'] = ''
-
-        # 切换到第一个打开的标签页
-        self.current_tab_id = min(self.tabs.keys())
-        self.render_editor()
-
-    # 精简命令 op 映射到 open
-    do_op = do_open
-
-    # 切换标签页命令
-    def do_tab(self, arg):
-        """切换标签页: tab <标签页ID>"""
-        if not arg:
-            print("请指定标签页ID: tab <ID>")
+    async def action_save_file(self) -> None:
+        """保存当前文件"""
+        if self.current_file is None:
+            self.notify("请先通过 open 命令打开/创建文件或使用 save <path> 另存为", severity="warning")
             return
 
         try:
-            tab_id = int(arg.strip())
-            self._switch_tab(tab_id)
-            self.render_editor()
-        except ValueError:
-            print("无效的标签页ID，请输入数字")
+            self.current_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.current_file, "w", encoding="utf-8") as f:
+                f.write(self.editor.text)
+            self.is_modified = False
+            self.original_content = self.editor.text
+            self.update_title()
+            self.notify(f"已保存文件: {self.current_file}", severity="success")
+        except Exception as e:
+            self.notify(f"保存失败: {e}", severity="error")
 
-    # 移动光标命令 - 支持 move 和 mv
-    def do_move(self, arg):
-        """移动光标: move left/right [数量]（默认1格）或 mv l/r [数量]"""
-        state = self._get_current_state()
-        if not state or not state['is_active']:
-            print("请先使用 open <文件名> 或 op <文件名> 打开一个文件")
-            return
+    async def save_as_file(self, file_path: Path) -> None:
+        """另存为（直接覆盖）"""
+        try:
+            save_path = file_path.expanduser().resolve()
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(save_path, "w", encoding="utf-8") as f:
+                f.write(self.editor.text)
 
-        args = arg.split()
-        if not args:
-            print("请指定方向: move left/right [数量] 或 mv l/r [数量] 或 move start/end 或 mv st/ed")
-            return
+            self.current_file = save_path
+            self.is_modified = False
+            self.original_content = self.editor.text
+            self.update_title()
+            self.notify(f"已另存为: {save_path}", severity="success")
+        except Exception as e:
+            self.notify(f"另存为失败: {e}", severity="error")
 
-        # 替换精简子命令为标准子命令
-        direction = args[0].lower()
-        if direction == 'l':
-            direction = 'left'
-        elif direction == 'r':
-            direction = 'right'
-        elif direction == 'st':
-            direction = 'start'
-        elif direction == 'ed':
-            direction = 'end'
+    async def action_quit_app(self) -> None:
+        """直接退出，不保存"""
+        if self.check_modified_task:
+            self.check_modified_task.cancel()
+        self.exit()
 
-        # 处理移动到行首或行尾的情况
-        if direction == 'start':
-            state['cursor']['col'] = 0
-            self.render_editor()
-            return
-        elif direction == 'end':
-            # 检查内容是否为空（虽然我们确保了至少有一行）
-            current_line = state['content'][state['cursor']['row']]
-            state['cursor']['col'] = len(current_line)
-            self.render_editor()
-            return
+    async def action_save_and_quit(self) -> None:
+        """保存并退出"""
+        if self.current_file is not None:
+            await self.action_save_file()
+        if self.check_modified_task:
+            self.check_modified_task.cancel()
+        self.exit()
 
-        # 处理左右移动的情况
-        count = int(args[1]) if len(args) > 1 else 1
-
-        if count <= 0:
-            print("数量必须是正整数")
-            return
-
-        current_line = state['content'][state['cursor']['row']]
-
-        if direction == 'left':
-            state['cursor']['col'] = max(0, state['cursor']['col'] - count)
-        elif direction == 'right':
-            state['cursor']['col'] = min(len(current_line), state['cursor']['col'] + count)
+    async def action_command_input(self) -> None:
+        """显示/隐藏命令输入框"""
+        if self.command_input.display:
+            self.command_input.display = False
         else:
-            print("方向必须是 left/l, right/r, start/st 或 end/ed")
+            self.command_input.display = True
+            self.command_input.focus()
+
+    @on(Input.Submitted, "#command-input")
+    async def handle_command(self) -> None:
+        """处理命令输入"""
+        command_text = self.command_input.value.strip()
+        self.command_input.value = ""
+        if not command_text:
             return
 
-        self.render_editor()
+        parts = command_text.split(maxsplit=1)
+        command = parts[0].lower()
 
-    # 精简命令 mv 映射到 move
-    do_mv = do_move
-
-    # 行移动命令 - 支持 line 和 ln
-    def do_line(self, arg):
-        """将光标移动到指定行: line <行号> 或 ln <行号>"""
-        state = self._get_current_state()
-        if not state or not state['is_active']:
-            print("请先使用 open <文件名> 或 op <文件名> 打开一个文件")
-            return
-
-        current_line = len(state['content'])
-        if current_line == 0:
-            # 确保内容不为空
-            state['content'] = ['']
-            current_line = 1
-
-        if not arg:
-            print("请指定行号或位置: line <行号> 或 ln <行号> 或 line start/end 或 ln st/ed")
-            return
-
-        # 替换精简参数
-        arg = arg.lower()
-        if arg == 'st':
-            arg = 'start'
-        elif arg == 'ed':
-            arg = 'end'
-
-        # 处理移动到第一行或最后一行
-        if arg == 'start':
-            state['cursor']['row'] = 0
-            # 调整列位置到有效范围内
-            line_length = len(state['content'][0])
-            state['cursor']['col'] = min(state['cursor']['col'], line_length)
-            self.render_editor()
-            return
-        elif arg == 'end':
-            state['cursor']['row'] = len(state['content']) - 1
-            # 调整列位置到有效范围内
-            line_length = len(state['content'][state['cursor']['row']])
-            state['cursor']['col'] = min(state['cursor']['col'], line_length)
-            self.render_editor()
-            return
-
-        # 处理移动到指定行号
-        try:
-            line_num = int(arg.strip())
-            if line_num < 1 or line_num > len(state['content']):
-                print(f"行号必须在 1 到 {len(state['content'])} 之间")
+        if command == "open":
+            if len(parts) < 2:
+                self.notify("用法: open <path>", severity="warning")
                 return
-
-            # 转换为0-based索引
-            state['cursor']['row'] = line_num - 1
-            # 将光标移动到该行的最大可能位置
-            line_length = len(state['content'][state['cursor']['row']])
-            state['cursor']['col'] = min(state['cursor']['col'], line_length)
-
-            self.render_editor()
-        except ValueError:
-            print("无效的命令参数，使用 line <行号> 或 ln <行号> 或 line start/end 或 ln st/ed")
-
-    # 精简命令 ln 映射到 line
-    do_ln = do_line
-
-    # 换行命令 - 支持 break 和 bk
-    def do_break(self, arg):
-        """在光标位置换行: break 或 bk"""
-        state = self._get_current_state()
-        if not state or not state['is_active']:
-            print("请先使用 open <文件名> 或 op <文件名> 打开一个文件")
-            return
-
-        current_row = state['cursor']['row']
-        current_col = state['cursor']['col']
-
-        # 确保当前行索引有效
-        if current_row < 0 or current_row >= len(state['content']):
-            print("光标位置无效")
-            return
-
-        current_line = state['content'][current_row]
-
-        # 分割当前行
-        line_part1 = current_line[:current_col]
-        line_part2 = current_line[current_col:]
-
-        # 更新内容
-        state['content'][current_row] = line_part1
-        state['content'].insert(current_row + 1, line_part2)
-
-        # 移动光标到新行的开头
-        state['cursor']['row'] = current_row + 1
-        state['cursor']['col'] = 0
-
-        self.render_editor()
-
-    # 精简命令 bk 映射到 break
-    do_bk = do_break
-
-    # 写入命令 - 支持 write 和 wr
-    def do_write(self, arg):
-        """在光标前写入内容: write <内容> 或 wr <内容>"""
-        state = self._get_current_state()
-        if not state or not state['is_active']:
-            print("请先使用 open <文件名> 或 op <文件名> 打开一个文件")
-            return
-
-        if not arg:
-            print("请指定要写入的内容: write <内容> 或 wr <内容>")
-            return
-
-        text = arg
-        current_row = state['cursor']['row']
-        current_col = state['cursor']['col']
-        current_line = state['content'][current_row]
-
-        # 在光标位置插入文本
-        new_line = current_line[:current_col] + text + current_line[current_col:]
-        state['content'][current_row] = new_line
-
-        # 移动光标
-        state['cursor']['col'] += len(text)
-
-        self.render_editor()
-
-    # 精简命令 wr 映射到 write
-    do_wr = do_write
-
-    # 空格命令 - 支持 space 和 sp
-    def do_space(self, arg):
-        """插入空格: space [数量]（默认1个空格）或 sp [数量]"""
-        state = self._get_current_state()
-        if not state or not state['is_active']:
-            print("请先使用 open <文件名> 或 op <文件名> 打开一个文件")
-            return
-
-        # 确定要插入的空格数量，默认为1
-        try:
-            count = int(arg.strip()) if arg else 1
-            if count <= 0:
-                print("数量必须是正整数")
-                return
-        except ValueError:
-            print("无效的参数，使用 space [数量] 或 sp [数量]（数量必须是正整数）")
-            return
-
-        # 生成指定数量的空格
-        spaces = ' ' * count
-
-        current_row = state['cursor']['row']
-        current_col = state['cursor']['col']
-        current_line = state['content'][current_row]
-
-        # 在光标位置插入空格
-        new_line = current_line[:current_col] + spaces + current_line[current_col:]
-        state['content'][current_row] = new_line
-
-        # 移动光标
-        state['cursor']['col'] += count
-
-        self.render_editor()
-
-    # 精简命令 sp 映射到 space
-    do_sp = do_space
-
-    # 删除命令 - 支持 del（同时作为标准和精简命令）
-    def do_del(self, arg):
-        """删除操作: del [数量] - 删除光标前指定数量字符（默认1个）"""
-        state = self._get_current_state()
-        if not state or not state['is_active']:
-            print("请先使用 open <文件名> 或 op <文件名> 打开一个文件")
-            return
-
-        # 检查内容是否为空
-        if not state['content']:
-            # 确保至少有一行空内容
-            state['content'] = ['']
-            print("文件为空，已初始化一行空内容")
-            self.render_editor()
-            return
-
-        args = arg.split()
-        # 替换精简参数
-        for i in range(len(args)):
-            if args[i] == 'rng':
-                args[i] = 'range'
-            elif args[i] == 'a':
-                args[i] = 'all'
-
-        if not args:
-            # 默认删除光标前一个字符
-            self.delete_chars(state, 1)
-            return
-
-        if args[0] == 'range':
-            if len(args) < 2:
-                print("请指定删除范围: del range <开始> <结束> 或 del rng <开始> <结束> 或 del range all 或 del rng a")
-                return
-
-            if args[1] == 'all':
-                # 删除全部内容，但保留一行空内容
-                state['content'] = ['']
-                state['cursor'] = {'row': 0, 'col': 0}
-                self.render_editor()
-                return
-
-            # 处理范围删除
-            try:
-                if len(args) == 3:
-                    # 解析开始和结束列
-                    start_col = int(args[1]) - 1  # 转换为0-based
-                    end_col = int(args[2]) - 1
-
-                    if start_col < 0 or end_col < start_col:
-                        print("无效的范围参数")
-                        return
-
-                    current_row = state['cursor']['row']
-                    current_line = state['content'][current_row]
-
-                    if end_col >= len(current_line):
-                        print("结束位置超出行长度")
-                        return
-
-                    # 删除范围内的字符
-                    new_line = current_line[:start_col] + current_line[end_col+1:]
-                    state['content'][current_row] = new_line
-
-                    # 调整光标位置
-                    state['cursor']['col'] = min(start_col, len(new_line))
-                else:
-                    # 跨多行范围
-                    # 解析开始位置 "行,列"
-                    start_pos = args[1].split(',')
-                    start_row = int(start_pos[0]) - 1
-                    start_col = int(start_pos[1]) - 1
-
-                    # 解析结束位置 "行,列"
-                    end_pos = args[2].split(',')
-                    end_row = int(end_pos[0]) - 1
-                    end_col = int(end_pos[1]) - 1
-
-                    if (start_row < 0 or end_row < start_row or
-                        end_row >= len(state['content'])):
-                        print("无效的范围参数")
-                        return
-
-                    # 处理单行范围
-                    if start_row == end_row:
-                        current_line = state['content'][start_row]
-                        if (start_col < 0 or end_col < start_col or
-                            end_col >= len(current_line)):
-                            print("无效的列范围")
-                            return
-
-                        new_line = current_line[:start_col] + current_line[end_col+1:]
-                        state['content'][start_row] = new_line
-                        state['cursor'] = {'row': start_row, 'col': start_col}
-                    else:
-                        # 处理多行范围
-                        # 1. 处理起始行
-                        start_line = state['content'][start_row]
-                        state['content'][start_row] = start_line[:start_col]
-
-                        # 2. 处理结束行
-                        end_line = state['content'][end_row]
-                        remaining_end_line = end_line[end_col+1:]
-
-                        # 3. 合并起始行和结束行剩余部分
-                        state['content'][start_row] += remaining_end_line
-
-                        # 4. 删除中间行和结束行
-                        del state['content'][start_row+1:end_row+1]
-
-                        # 5. 调整光标位置
-                        state['cursor'] = {'row': start_row, 'col': start_col}
-
-                # 确保删除后内容不为空
-                if not state['content']:
-                    state['content'] = ['']
-
-                self.render_editor()
-            except (ValueError, IndexError):
-                print("无效的范围参数格式")
-            return
-
-        # 处理删除指定数量的字符
-        try:
-            count = int(args[0])
-            if count <= 0:
-                print("数量必须是正整数")
-                return
-
-            self.delete_chars(state, count)
-        except ValueError:
-            print("数量必须是整数")
-
-    def delete_chars(self, state: Dict, count: int):
-        """删除光标前指定数量的字符"""
-        current_row = state['cursor']['row']
-        current_col = state['cursor']['col']
-
-        if current_col == 0:
-            # 光标在行首，合并到上一行
-            if current_row == 0:
-                print('已在文件开头，无法删除')
-                return
-
-            # 获取上一行内容
-            prev_row = current_row - 1
-            prev_line = state['content'][prev_row]
-            current_line = state['content'][current_row]
-
-            # 合并行
-            state['content'][prev_row] = prev_line + current_line
-            # 删除当前行
-            del state['content'][current_row]
-            # 移动光标到上一行末尾
-            state['cursor'] = {
-                'row': prev_row,
-                'col': len(prev_line)
-            }
-        else:
-            # 正常删除字符
-            current_line = state['content'][current_row]
-            delete_count = min(count, current_col)
-            new_line = current_line[:current_col-delete_count] + current_line[current_col:]
-            state['content'][current_row] = new_line
-            state['cursor']['col'] -= delete_count
-
-        # 确保删除后内容不为空
-        if not state['content']:
-            state['content'] = ['']
-
-        self.render_editor()
-
-    # 复制命令 - 支持 copy 和 cp
-    def do_copy(self, arg):
-        """复制操作: copy - 复制全部内容 或 cp"""
-        state = self._get_current_state()
-        if not state or not state['is_active']:
-            print("请先使用 open <文件名> 或 op <文件名> 打开一个文件")
-            return
-
-        # 检查内容是否为空（虽然我们确保了至少有一行）
-        if not state['content']:
-            print("文件为空，没有可复制的内容")
-            state['clipboard'] = ''
-            return
-
-        args = arg.split()
-        # 替换精简参数
-        for i in range(len(args)):
-            if args[i] == 'rng':
-                args[i] = 'range'
-
-        if not args:
-            # 复制全部内容
-            state['clipboard'] = '\n'.join(state['content'])
-            print('已复制全部内容到剪贴板')
-            self.render_editor()
-            return
-
-        if args[0] == 'range' and len(args) >= 3:
-            # 复制指定范围
-            try:
-                start_row, start_col, end_row, end_col = 0, 0, 0, 0
-
-                if len(args) == 3:
-                    # 同一行内的范围
-                    start_row = state['cursor']['row']
-                    end_row = state['cursor']['row']
-                    start_col = int(args[1]) - 1
-                    end_col = int(args[2]) - 1
-                else:
-                    # 跨多行范围
-                    start_pos = args[1].split(',')
-                    start_row = int(start_pos[0]) - 1
-                    start_col = int(start_pos[1]) - 1
-
-                    end_pos = args[2].split(',')
-                    end_row = int(end_pos[0]) - 1
-                    end_col = int(end_pos[1]) - 1
-
-                if (start_row < 0 or end_row < start_row or
-                    end_row >= len(state['content'])):
-                    raise ValueError('无效的范围参数')
-
-                copy_content = []
-
-                if start_row == end_row:
-                    # 单行复制
-                    line = state['content'][start_row]
-                    if start_col < 0 or end_col < start_col or end_col >= len(line):
-                        raise ValueError('无效的列范围')
-                    copy_content.append(line[start_col:end_col+1])
-                else:
-                    # 多行复制
-                    # 起始行
-                    start_line = state['content'][start_row]
-                    copy_content.append(start_line[start_col:])
-
-                    # 中间行
-                    for i in range(start_row + 1, end_row):
-                        copy_content.append(state['content'][i])
-
-                    # 结束行
-                    end_line = state['content'][end_row]
-                    copy_content.append(end_line[:end_col+1])
-
-                state['clipboard'] = '\n'.join(copy_content)
-                print('已复制指定范围内容到剪贴板')
-                self.render_editor()
-            except (ValueError, IndexError):
-                print('复制失败: 无效的范围参数')
-            return
-
-        print('无效的复制命令，使用 copy 或 cp 或 copy range <范围> 或 cp rng <范围>')
-
-    # 精简命令 cp 映射到 copy
-    do_cp = do_copy
-
-    # 粘贴命令 - 支持 paste 和 pt
-    def do_paste(self, arg):
-        """粘贴操作: paste - 在光标前粘贴内容 或 pt"""
-        state = self._get_current_state()
-        if not state or not state['is_active']:
-            print("请先使用 open <文件名> 或 op <文件名> 打开一个文件")
-            return
-
-        if not state['clipboard']:
-            print('剪贴板为空')
-            return
-
-        args = arg.split()
-        # 替换精简参数
-        for i in range(len(args)):
-            if args[i] == 'rng':
-                args[i] = 'range'
-
-        if not args:
-            # 简单粘贴
-            self.paste_content(state, state['clipboard'])
-            return
-
-        if args[0] == 'range' and len(args) >= 3:
-            # 剪切指定范围并粘贴
-            try:
-                start_row, start_col, end_row, end_col = 0, 0, 0, 0
-
-                if len(args) == 3:
-                    # 同一行内的范围
-                    start_row = state['cursor']['row']
-                    end_row = state['cursor']['row']
-                    start_col = int(args[1]) - 1
-                    end_col = int(args[2]) - 1
-                else:
-                    # 跨多行范围
-                    start_pos = args[1].split(',')
-                    start_row = int(start_pos[0]) - 1
-                    start_col = int(start_pos[1]) - 1
-
-                    end_pos = args[2].split(',')
-                    end_row = int(end_pos[0]) - 1
-                    end_col = int(end_pos[1]) - 1
-
-                # 先保存要剪切的内容
-                cut_content = []
-                if start_row == end_row:
-                    line = state['content'][start_row]
-                    cut_content.append(line[start_col:end_col+1])
-                else:
-                    start_line = state['content'][start_row]
-                    cut_content.append(start_line[start_col:])
-
-                    for i in range(start_row + 1, end_row):
-                        cut_content.append(state['content'][i])
-
-                    end_line = state['content'][end_row]
-                    cut_content.append(end_line[:end_col+1])
-
-                cut_text = '\n'.join(cut_content)
-
-                # 删除指定范围内容
-                if start_row == end_row:
-                    line = state['content'][start_row]
-                    state['content'][start_row] = line[:start_col] + line[end_col+1:]
-                    state['cursor'] = {'row': start_row, 'col': start_col}
-                else:
-                    start_line = state['content'][start_row]
-                    state['content'][start_row] = start_line[:start_col]
-
-                    end_line = state['content'][end_row]
-                    remaining_end_line = end_line[end_col+1:]
-
-                    state['content'][start_row] += remaining_end_line
-                    del state['content'][start_row+1:end_row+1]
-
-                    state['cursor'] = {'row': start_row, 'col': start_col}
-
-                # 确保删除后内容不为空
-                if not state['content']:
-                    state['content'] = ['']
-
-                # 粘贴剪切的内容
-                state['clipboard'] = cut_text
-                self.paste_content(state, cut_text)
-
-                print('已剪切并粘贴指定范围内容')
-                self.render_editor()
-            except (ValueError, IndexError):
-                print('剪切粘贴失败: 无效的范围参数')
-            return
-
-        print('无效的粘贴命令，使用 paste 或 pt 或 paste range <范围> 或 pt rng <范围>')
-
-    # 精简命令 pt 映射到 paste
-    do_pt = do_paste
-
-    def paste_content(self, state: Dict, content: str):
-        """粘贴内容到光标位置"""
-        lines = content.split('\n')
-        current_row = state['cursor']['row']
-        current_col = state['cursor']['col']
-        current_line = state['content'][current_row]
-
-        if len(lines) == 1:
-            # 单行内容，直接插入
-            new_line = current_line[:current_col] + lines[0] + current_line[current_col:]
-            state['content'][current_row] = new_line
-            state['cursor']['col'] += len(lines[0])
-        else:
-            # 多行内容，需要拆分处理
-            # 1. 处理当前行
-            first_line = lines[0]
-            remaining_lines = lines[1:]
-            new_current_line = current_line[:current_col] + first_line
-            state['content'][current_row] = new_current_line
-
-            # 2. 插入剩余行
-            for i, line in enumerate(reversed(remaining_lines)):
-                state['content'].insert(current_row + 1, line)
-
-            # 3. 调整光标位置
-            state['cursor']['row'] = current_row + len(remaining_lines)
-            state['cursor']['col'] = len(remaining_lines[-1]) if remaining_lines else current_col + len(first_line)
-
-        self.render_editor()
-
-    # 保存命令 - 支持 save 和 s
-    def do_save(self, arg):
-        """保存文件: save 或 s"""
-        state = self._get_current_state()
-        if not state or not state['is_active']:
-            print("请先使用 open <文件名> 或 op <文件名> 打开一个文件")
-            return
-
-        if not state['current_file']:
-            print('没有打开的文件')
-            return
-
-        try:
-            with open(state['current_file'], 'w', encoding='utf-8') as f:
-                f.write('\n'.join(state['content']))
-            print(f'文件 {state["current_file"]} 已保存')
-            self.render_editor()
-        except IOError as e:
-            print(f'无法保存文件 {state["current_file"]}: {str(e)}')
-
-    # 精简命令 s 映射到 save
-    do_s = do_save
-
-    # 退出命令 - 支持 quit 和 q
-    def do_quit(self, arg):
-        """退出编辑器（不保存）: quit 或 q"""
-        state = self._get_current_state()
-        if not state or not state['is_active']:
-            print("没有打开的编辑器")
-            return
-
-        print(f"已关闭标签页 {self.current_tab_id}，未保存的更改将丢失")
-        self._close_tab(self.current_tab_id)
-        if self.tabs:
-            self.render_editor()
-        else:
-            self.prompt = 've> '
-
-    # 精简命令 q 映射到 quit
-    do_q = do_quit
-
-    # 保存并退出命令 - qs（同时作为标准和精简命令）
-    def do_qs(self, arg):
-        """保存并退出: qs"""
-        state = self._get_current_state()
-        if not state or not state['is_active']:
-            print("没有打开的编辑器")
-            return
-
-        # 保存文件
-        try:
-            with open(state['current_file'], 'w', encoding='utf-8') as f:
-                f.write('\n'.join(state['content']))
-            print(f'文件 {state["current_file"]} 已保存')
-        except IOError as e:
-            print(f'无法保存文件 {state["current_file"]}: {str(e)}')
-            return
-
-        # 关闭标签页
-        print(f"已保存并关闭标签页 {self.current_tab_id}")
-        self._close_tab(self.current_tab_id)
-        if self.tabs:
-            self.render_editor()
-        else:
-            self.prompt = 've> '
-
-    # 退出程序命令 - 支持 exit 和 et
-    def do_exit(self, arg):
-        """退出ve程序: exit 或 et"""
-        print("退出ve编辑器")
-        return True
-
-    # 精简命令 et 映射到 exit
-    do_et = do_exit
-
-    def do_help(self, arg):
-        """显示帮助信息: help"""
-        print('=== ve编辑器命令帮助 ===')
-        print('open <文件名> 或 op <文件名>  - 打开文件进行编辑')
-        print('tab <标签页ID>               - 切换到指定标签页')
-        print('move left/right [数量] 或 mv l/r [数量] - 移动光标（默认1格）')
-        print('move start 或 mv st       - 移动光标到当前行首')
-        print('move end 或 mv ed         - 移动光标到当前行尾')
-        print('line <行号> 或 ln <行号>   - 将光标移动到指定行')
-        print('line start 或 ln st       - 将光标移动到第一行')
-        print('line end 或 ln ed         - 将光标移动到最后一行')
-        print('break 或 bk               - 在光标位置换行')
-        print('write <内容> 或 wr <内容>  - 在光标前写入内容')
-        print('space [数量] 或 sp [数量]  - 插入空格（默认1个）')
-        print('del [数量]                - 删除光标前指定数量字符（默认1个）')
-        print('del range all 或 del rng a - 删除全部内容')
-        print('del range <开始> <结束> 或 del rng <开始> <结束> - 删除指定范围内容')
-        print('copy 或 cp                - 复制全部内容')
-        print('copy range <开始> <结束> 或 cp rng <开始> <结束> - 复制指定范围内容')
-        print('paste 或 pt               - 在光标前粘贴内容')
-        print('paste range <开始> <结束> 或 pt rng <开始> <结束> - 剪切指定范围并粘贴')
-        print('quit 或 q                 - 关闭当前标签页（不保存）')
-        print('save 或 s                 - 保存当前标签页文件')
-        print('qs                        - 保存并关闭当前标签页')
-        print('exit 或 et                - 退出ve程序')
-
-        if self.tabs:
-            self.render_editor()
-
-    def render_editor(self):
-        """渲染编辑器界面"""
-        if not self.tabs or self.current_tab_id not in self.tabs:
-            return
-
-        state = self.tabs[self.current_tab_id]
-        self.clear_screen()
-
-        # 显示所有标签页，每行最多 5 个
-        tab_line = []
-        for tab_id, tab_state in sorted(self.tabs.items()):
-            tab_name = tab_state['current_file']
-            if tab_id == self.current_tab_id:
-                tab_line.append(f"\033[92m[{tab_name} (tab:{tab_id})]\033[0m")  # 绿色表示当前标签页
+            file_path = Path(parts[1])
+            self.load_or_create_file(file_path)
+
+        elif command == "save":
+            if len(parts) < 2:
+                await self.action_save_file()
             else:
-                tab_line.append(f"[{tab_name} (tab:{tab_id})]")
+                await self.save_as_file(Path(parts[1]))
 
-            # 每行最多 5 个标签页
-            if len(tab_line) == 5:
-                print(" ".join(tab_line))
-                tab_line = []
+        elif command == "quit":
+            await self.action_quit_app()
 
-        # 打印剩余的标签页
-        if tab_line:
-            print(" ".join(tab_line))
+        else:
+            self.notify(f"未知命令: {command}", severity="error")
 
-        # 显示当前标签页
-        print(f"正在编辑: {state['current_file']} (tab:{self.current_tab_id})")
-        print("-" * 40)
+def main():
+    """主函数"""
+    current_file = None
+    if len(sys.argv) > 1:
+        current_file = Path(sys.argv[1])
 
-        # 计算最大行号的位数，用于对齐
-        max_line_num = len(state['content'])
-        max_digits = len(str(max_line_num)) if max_line_num > 0 else 1
+    app = VisualEditor()
+    app.current_file = current_file
+    app.run()
 
-        # 显示内容和行号
-        for row_idx, line in enumerate(state['content']):
-            # 行号显示，使用格式化确保对齐
-            line_num = f"[{row_idx + 1:>{max_digits}}] "
-            # 光标所在行
-            if row_idx == state['cursor']['row']:
-                # 插入光标
-                cursor_pos = state['cursor']['col']
-                line_with_cursor = line[:cursor_pos] + '█' + line[cursor_pos:]
-                print(f"\033[94m{line_num}\033[0m{line_with_cursor}")  # 蓝色行号
-            else:
-                print(f"\033[94m{line_num}\033[0m{line}")  # 蓝色行号
-
-        print("-" * 40)
-        # 显示光标位置提示
-        print(f"光标位置: 行 {state['cursor']['row'] + 1}, 列 {state['cursor']['col'] + 1} | 输入 help 查看命令")
-        print(self.prompt, end='', flush=True)
-
-    # 处理未知命令
-    def default(self, line):
-        print(f"未知命令: {line}")
-        print("输入 help 查看可用命令")
-        if self.tabs:
-            self.render_editor()
-
-if __name__ == '__main__':
-    editor = VeEditor()
-    editor.cmdloop()
+if __name__ == "__main__":
+    main()
